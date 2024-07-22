@@ -1,4 +1,31 @@
-### 0.8.26 (unreleased)
+### 0.8.27 (unreleased)
+
+Language Features:
+ * Accept declarations of state variables with ``transient`` data location (parser support only, no code generation yet).
+ * Make ``require(bool, Error)`` available when using the legacy pipeline.
+ * Yul: Parsing rules for source location comments have been relaxed: Whitespace between the location components as well as single-quoted code snippets are now allowed.
+
+
+Compiler Features:
+ * Error Reporting: Unimplemented features are now properly reported as errors instead of being handled as if they were bugs.
+ * EVM: Support for the EVM version "Prague".
+ * SMTChecker: Add CHC engine check for underflow and overflow in unary minus operation.
+ * SMTChecker: Replace CVC4 as a possible BMC backend with cvc5.
+ * Yul Optimizer: The optimizer now treats some previously unrecognized identical literals as identical.
+
+
+Bugfixes:
+ * SMTChecker: Fix error that reports invalid number of verified checks for BMC and CHC engines.
+ * SMTChecker: Fix formatting of unary minus expressions in invariants.
+ * SMTChecker: Fix internal compiler error when reporting proved targets for BMC engine.
+ * TypeChecker: Fix segfault when assigning nested tuple to tuple.
+ * Yul AST: Fix ``nativeSrc`` attributes in optimized IR AST referring to locations in unoptimized IR.
+ * Yul IR Code Generation: Deterministic order of Yul subobjects.
+ * Yul Optimizer: Name simplification could lead to forbidden identifiers with a leading and/or trailing dot, e.g., ``x._`` would get simplified into ``x.``.
+ * Yul Parser: Fix segfault when parsing very long location comments.
+
+
+### 0.8.26 (2024-05-21)
 
 Language Features:
  * Introduce a new overload ``require(bool, Error)`` that allows usage of ``require`` functions with custom errors. This feature is available in the ``via-ir`` pipeline only.

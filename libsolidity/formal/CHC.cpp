@@ -25,6 +25,7 @@
 #endif
 
 #include <libsolidity/formal/ArraySlicePredicate.h>
+#include <libsolidity/formal/EldaricaCHCSmtLib2Interface.h>
 #include <libsolidity/formal/Invariants.h>
 #include <libsolidity/formal/PredicateInstance.h>
 #include <libsolidity/formal/PredicateSort.h>
@@ -62,12 +63,13 @@ CHC::CHC(
 	EncodingContext& _context,
 	UniqueErrorReporter& _errorReporter,
 	UniqueErrorReporter& _unsupportedErrorReporter,
+	ErrorReporter& _provedSafeReporter,
 	std::map<util::h256, std::string> const& _smtlib2Responses,
 	ReadCallback::Callback const& _smtCallback,
 	ModelCheckerSettings _settings,
 	CharStreamProvider const& _charStreamProvider
 ):
-	SMTEncoder(_context, _settings, _errorReporter, _unsupportedErrorReporter, _charStreamProvider),
+	SMTEncoder(_context, _settings, _errorReporter, _unsupportedErrorReporter, _provedSafeReporter, _charStreamProvider),
 	m_smtlib2Responses(_smtlib2Responses),
 	m_smtCallback(_smtCallback)
 {
@@ -141,6 +143,9 @@ bool CHC::visit(ContractDefinition const& _contract)
 {
 	if (!shouldAnalyze(_contract))
 		return false;
+
+	// Raises UnimplementedFeatureError in the presence of transient storage variables
+	TransientDataLocationChecker checker(_contract);
 
 	resetContractAnalysis();
 	initContract(_contract);
@@ -554,6 +559,23 @@ void CHC::endVisit(UnaryOperation const& _op)
 		internalFunctionCall(funDef, std::nullopt, _op.userDefinedFunctionType(), arguments, state().thisAddress());
 
 		createReturnedExpressions(funDef, _op);
+		return;
+	}
+
+	if (
+		_op.annotation().type->category() == Type::Category::RationalNumber ||
+		_op.annotation().type->category() == Type::Category::FixedPoint
+	)
+		return;
+
+	if (_op.getOperator() == Token::Sub && smt::isInteger(*_op.annotation().type))
+	{
+		auto const* intType = dynamic_cast<IntegerType const*>(_op.annotation().type);
+		if (!intType)
+			intType = TypeProvider::uint256();
+
+		verificationTargetEncountered(&_op, VerificationTargetType::Underflow, expr(_op) < intType->minValue());
+		verificationTargetEncountered(&_op, VerificationTargetType::Overflow, expr(_op) > intType->maxValue());
 	}
 }
 
@@ -1272,15 +1294,23 @@ void CHC::resetSourceAnalysis()
 		solAssert(false);
 #endif
 	}
-	if (!m_settings.solvers.z3)
+	else
 	{
 		solAssert(m_settings.solvers.smtlib2 || m_settings.solvers.eld);
-
 		if (!m_interface)
-			m_interface = std::make_unique<CHCSmtLib2Interface>(m_smtlib2Responses, m_smtCallback, m_settings.solvers, m_settings.timeout);
+		{
+			if (m_settings.solvers.eld)
+				m_interface = std::make_unique<EldaricaCHCSmtLib2Interface>(
+					m_smtCallback,
+					m_settings.timeout,
+					m_settings.invariants != ModelCheckerInvariants::None()
+				);
+			else
+				m_interface = std::make_unique<CHCSmtLib2Interface>(m_smtlib2Responses, m_smtCallback, m_settings.timeout);
+		}
 
 		auto smtlib2Interface = dynamic_cast<CHCSmtLib2Interface*>(m_interface.get());
-		solAssert(smtlib2Interface, "");
+		solAssert(smtlib2Interface);
 		smtlib2Interface->reset();
 		m_context.setSolver(smtlib2Interface->smtlib2Interface());
 	}
@@ -1625,11 +1655,6 @@ smtutil::Expression CHC::interface(ContractDefinition const& _contract)
 smtutil::Expression CHC::error()
 {
 	return (*m_errorPredicate)({});
-}
-
-smtutil::Expression CHC::error(unsigned _idx)
-{
-	return m_errorPredicate->functor(_idx)({});
 }
 
 smtutil::Expression CHC::initializer(ContractDefinition const& _contract, ContractDefinition const& _contractContext)
@@ -2087,17 +2112,22 @@ void CHC::checkVerificationTargets()
 		);
 
 	if (!m_settings.showProvedSafe && !m_safeTargets.empty())
+	{
+		std::size_t provedSafeNum = 0;
+		for (auto&& [_, targets]: m_safeTargets)
+			provedSafeNum += targets.size();
 		m_errorReporter.info(
 			1391_error,
 			"CHC: " +
-			std::to_string(m_safeTargets.size()) +
+			std::to_string(provedSafeNum) +
 			" verification condition(s) proved safe!" +
 			" Enable the model checker option \"show proved safe\" to see all of them."
 		);
+	}
 	else if (m_settings.showProvedSafe)
 		for (auto const& [node, targets]: m_safeTargets)
 			for (auto const& target: targets)
-				m_errorReporter.info(
+				m_provedSafeReporter.info(
 					9576_error,
 					node->location(),
 					"CHC: " +
@@ -2384,22 +2414,17 @@ std::map<unsigned, std::vector<unsigned>> CHC::summaryCalls(CHCSolverInterface::
 			// nondet_call_<CALLID>_<suffix>
 			// Those have the extra unique <CALLID> numbers based on the traversal order, and are necessary
 			// to infer the call order so that's shown property in the counterexample trace.
-			// Predicates that do not have a CALLID have a predicate id at the end of <suffix>,
-			// so the assertion below should still hold.
+			// For other predicates, we do not care.
 			auto beg = _s.data();
 			while (beg != _s.data() + _s.size() && !isDigit(*beg)) ++beg;
-			auto end = beg;
-			while (end != _s.data() + _s.size() && isDigit(*end)) ++end;
-
-			solAssert(beg != end, "Expected to find numerical call or predicate id.");
-
-			int result;
-			auto [p, ec] = std::from_chars(beg, end, result);
-			solAssert(ec == std::errc(), "Id should be a number.");
-
+			int result = -1;
+			static_cast<void>(std::from_chars(beg, _s.data() + _s.size(), result));
 			return result;
 		};
-		return extract(_graph.nodes.at(_a).name) > extract(_graph.nodes.at(_b).name);
+		auto anum = extract(_graph.nodes.at(_a).name);
+		auto bnum = extract(_graph.nodes.at(_b).name);
+		// The second part of the condition is needed to ensure that two different predicates are not considered equal
+		return (anum > bnum) || (anum == bnum && _graph.nodes.at(_a).name > _graph.nodes.at(_b).name);
 	};
 
 	std::queue<std::pair<unsigned, unsigned>> q;

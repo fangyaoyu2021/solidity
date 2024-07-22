@@ -605,7 +605,7 @@ General Information)").c_str(),
 			g_strEVMVersion.c_str(),
 			po::value<std::string>()->value_name("version")->default_value(EVMVersion{}.name()),
 			"Select desired EVM version. Either homestead, tangerineWhistle, spuriousDragon, "
-			"byzantium, constantinople, petersburg, istanbul, berlin, london, paris, shanghai or cancun."
+			"byzantium, constantinople, petersburg, istanbul, berlin, london, paris, shanghai, cancun or prague."
 		)
 	;
 	if (!_forHelp) // Note: We intentionally keep this undocumented for now.
@@ -877,7 +877,7 @@ General Information)").c_str(),
 		)
 		(
 			g_strModelCheckerSolvers.c_str(),
-			po::value<std::string>()->value_name("cvc4,eld,z3,smtlib2")->default_value("z3"),
+			po::value<std::string>()->value_name("cvc5,eld,z3,smtlib2")->default_value("z3"),
 			"Select model checker solvers."
 		)
 		(

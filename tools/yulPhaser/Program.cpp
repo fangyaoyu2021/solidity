@@ -28,7 +28,7 @@
 #include <libyul/AsmPrinter.h>
 #include <libyul/AST.h>
 #include <libyul/ObjectParser.h>
-#include <libyul/YulString.h>
+#include <libyul/YulName.h>
 #include <libyul/backends/evm/EVMDialect.h>
 #include <libyul/optimiser/Disambiguator.h>
 #include <libyul/optimiser/ForLoopInitRewriter.h>
@@ -135,7 +135,7 @@ std::variant<std::unique_ptr<Block>, ErrorList> Program::parseObject(Dialect con
 			// The other object references the nested one which makes analysis fail. Below we try to
 			// extract just the nested one for that reason. This is just a heuristic. If there's no
 			// subobject with such a suffix we fall back to accepting the whole object as is.
-			if (subObject != nullptr && subObject->name.str() == object->name.str() + "_deployed")
+			if (subObject != nullptr && subObject->name == object->name + "_deployed")
 			{
 				deployedObject = dynamic_cast<Object*>(subObject.get());
 				if (deployedObject != nullptr)
@@ -175,7 +175,7 @@ std::unique_ptr<Block> Program::disambiguateAST(
 	AsmAnalysisInfo const& _analysisInfo
 )
 {
-	std::set<YulString> const externallyUsedIdentifiers = {};
+	std::set<YulName> const externallyUsedIdentifiers = {};
 	Disambiguator disambiguator(_dialect, _analysisInfo, externallyUsedIdentifiers);
 
 	return std::make_unique<Block>(std::get<Block>(disambiguator(_ast)));
@@ -190,7 +190,7 @@ std::unique_ptr<Block> Program::applyOptimisationSteps(
 {
 	// An empty set of reserved identifiers. It could be a constructor parameter but I don't
 	// think it would be useful in this tool. Other tools (like yulopti) have it empty too.
-	std::set<YulString> const externallyUsedIdentifiers = {};
+	std::set<YulName> const externallyUsedIdentifiers = {};
 	OptimiserStepContext context{
 		_dialect,
 		_nameDispenser,

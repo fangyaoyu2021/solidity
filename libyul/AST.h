@@ -24,9 +24,11 @@
 #pragma once
 
 #include <libyul/ASTForward.h>
-#include <libyul/YulString.h>
+#include <libyul/YulName.h>
 
 #include <liblangutil/DebugData.h>
+
+#include <libsolutil/Numeric.h>
 
 #include <memory>
 #include <optional>
@@ -34,16 +36,41 @@
 namespace solidity::yul
 {
 
-using Type = YulString;
+using Type = YulName;
 
-struct TypedName { langutil::DebugData::ConstPtr debugData; YulString name; Type type; };
+struct TypedName { langutil::DebugData::ConstPtr debugData; YulName name; Type type; };
 using TypedNameList = std::vector<TypedName>;
 
 /// Literal number or string (up to 32 bytes)
 enum class LiteralKind { Number, Boolean, String };
-struct Literal { langutil::DebugData::ConstPtr debugData; LiteralKind kind; YulString value; Type type; };
+/// Literal value that holds a u256 word of data, can be of LiteralKind type and - in case of arguments to
+/// builtins - exceed the u256 word (32 bytes), in which case the value is stored as string. The former is constructed
+/// via u256 word and optional hint and leads to unlimited == false, the latter is
+/// constructed via the string constructor and leads to unlimited == true.
+class LiteralValue {
+public:
+	using Data = u256;
+	using BuiltinStringLiteralData = std::string;
+	using RepresentationHint = std::shared_ptr<std::string>;
+
+	LiteralValue() = default;
+	explicit LiteralValue(std::string _builtinStringLiteralValue);
+	explicit LiteralValue(Data const& _data, std::optional<std::string> const& _hint = std::nullopt);
+
+	bool operator==(LiteralValue const& _rhs) const;
+	bool operator<(LiteralValue const& _rhs) const;
+	Data const& value() const;
+	BuiltinStringLiteralData const& builtinStringLiteralValue() const;
+	bool unlimited() const;
+	RepresentationHint const& hint() const;
+
+private:
+	std::optional<Data> m_numericValue;
+	std::shared_ptr<std::string> m_stringValue;
+};
+struct Literal { langutil::DebugData::ConstPtr debugData; LiteralKind kind; LiteralValue value; Type type; };
 /// External / internal identifier or label reference
-struct Identifier { langutil::DebugData::ConstPtr debugData; YulString name; };
+struct Identifier { langutil::DebugData::ConstPtr debugData; YulName name; };
 /// Assignment ("x := mload(20:u256)", expects push-1-expression on the right hand
 /// side and requires x to occupy exactly one stack slot.
 ///
@@ -59,7 +86,7 @@ struct VariableDeclaration { langutil::DebugData::ConstPtr debugData; TypedNameL
 /// Block that creates a scope (frees declared stack variables)
 struct Block { langutil::DebugData::ConstPtr debugData; std::vector<Statement> statements; };
 /// Function definition ("function f(a, b) -> (d, e) { ... }")
-struct FunctionDefinition { langutil::DebugData::ConstPtr debugData; YulString name; TypedNameList parameters; TypedNameList returnVariables; Block body; };
+struct FunctionDefinition { langutil::DebugData::ConstPtr debugData; YulName name; TypedNameList parameters; TypedNameList returnVariables; Block body; };
 /// Conditional execution without "else" part.
 struct If { langutil::DebugData::ConstPtr debugData; std::unique_ptr<Expression> condition; Block body; };
 /// Switch case or default case

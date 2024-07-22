@@ -691,6 +691,12 @@ bool CommandLineInterface::run(int _argc, char const* const* _argv)
 
 		return false;
 	}
+	catch (UnimplementedFeatureError const& _error)
+	{
+		solAssert(_error.comment(), "Unimplemented feature errors must include a message for the user");
+		report(Error::Severity::Error, stringOrDefault(_error.comment(), "Unimplemented feature"));
+		return false;
+	}
 }
 
 bool CommandLineInterface::parseArguments(int _argc, char const* const* _argv)
@@ -914,20 +920,6 @@ void CommandLineInterface::compile()
 			Error::errorSeverity(Error::Type::CompilerError)
 		);
 		solThrow(CommandLineExecutionError, "");
-	}
-	catch (Error const& _error)
-	{
-		if (_error.type() == Error::Type::DocstringParsingError)
-		{
-			report(Error::Severity::Error, *boost::get_error_info<errinfo_comment>(_error));
-			solThrow(CommandLineExecutionError, "Documentation parsing failed.");
-		}
-		else
-		{
-			m_hasOutput = true;
-			formatter.printErrorInformation(_error);
-			solThrow(CommandLineExecutionError, "");
-		}
 	}
 }
 

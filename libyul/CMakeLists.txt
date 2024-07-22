@@ -5,6 +5,7 @@ add_library(yul
 	AsmAnalysis.h
 	AsmAnalysisInfo.h
 	AST.h
+	AST.cpp
 	ASTForward.h
 	AsmJsonConverter.h
 	AsmJsonConverter.cpp
@@ -36,6 +37,7 @@ add_library(yul
 	ScopeFiller.h
 	Utilities.cpp
 	Utilities.h
+	YulName.h
 	YulString.h
 	backends/evm/AbstractAssembly.h
 	backends/evm/AsmCodeGen.cpp

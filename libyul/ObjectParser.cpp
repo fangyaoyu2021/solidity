@@ -32,6 +32,7 @@
 
 #include <regex>
 
+using namespace std::string_literals;
 using namespace solidity;
 using namespace solidity::yul;
 using namespace solidity::util;
@@ -49,7 +50,7 @@ std::shared_ptr<Object> ObjectParser::parse(std::shared_ptr<Scanner> const& _sca
 		{
 			// Special case: Code-only form.
 			object = std::make_shared<Object>();
-			object->name = "object"_yulstring;
+			object->name = "object";
 			auto sourceNameMapping = tryParseSourceNameMapping();
 			object->debugData = std::make_shared<ObjectDebugData>(ObjectDebugData{sourceNameMapping});
 			object->code = parseBlock(sourceNameMapping);
@@ -62,10 +63,9 @@ std::shared_ptr<Object> ObjectParser::parse(std::shared_ptr<Scanner> const& _sca
 			expectToken(Token::EOS);
 		return object;
 	}
-	catch (FatalError const&)
+	catch (FatalError const& error)
 	{
-		if (m_errorReporter.errors().empty())
-			throw; // Something is weird here, rather throw again.
+		yulAssert(m_errorReporter.hasErrors(), "Unreported fatal error: "s + error.what());
 	}
 	return nullptr;
 }
@@ -185,7 +185,7 @@ void ObjectParser::parseData(Object& _containingObject)
 	);
 	advance();
 
-	YulString name = parseUniqueName(&_containingObject);
+	auto const name = parseUniqueName(&_containingObject);
 
 	if (currentToken() == Token::HexStringLiteral)
 		expectToken(Token::HexStringLiteral, false);
@@ -195,22 +195,26 @@ void ObjectParser::parseData(Object& _containingObject)
 	advance();
 }
 
-YulString ObjectParser::parseUniqueName(Object const* _containingObject)
+std::string ObjectParser::parseUniqueName(Object const* _containingObject)
 {
 	expectToken(Token::StringLiteral, false);
-	YulString name{currentLiteral()};
+	auto const name = currentLiteral();
 	if (name.empty())
 		parserError(3287_error, "Object name cannot be empty.");
 	else if (_containingObject && _containingObject->name == name)
 		parserError(8311_error, "Object name cannot be the same as the name of the containing object.");
 	else if (_containingObject && _containingObject->subIndexByName.count(name))
-		parserError(8794_error, "Object name \"" + name.str() + "\" already exists inside the containing object.");
+		parserError(8794_error, "Object name \"" + name + "\" already exists inside the containing object.");
 	advance();
 	return name;
 }
 
-void ObjectParser::addNamedSubObject(Object& _container, YulString _name, std::shared_ptr<ObjectNode> _subObject)
+void ObjectParser::addNamedSubObject(Object& _container, std::string_view const _name, std::shared_ptr<ObjectNode> _subObject)
 {
-	_container.subIndexByName[_name] = _container.subObjects.size();
+	_container.subIndexByName.emplace(
+		std::piecewise_construct,
+		std::forward_as_tuple(_name),
+		std::forward_as_tuple(_container.subObjects.size())
+	);
 	_container.subObjects.emplace_back(std::move(_subObject));
 }

@@ -49,6 +49,7 @@ using namespace solidity;
 using namespace solidity::yul;
 using namespace solidity::frontend;
 using namespace solidity::langutil;
+using namespace solidity::util;
 using namespace std::string_literals;
 
 namespace
@@ -1360,26 +1361,6 @@ Json StandardCompiler::compileSolidity(StandardCompiler::InputsAndSettings _inpu
 				));
 		}
 	}
-	/// This is only thrown in a very few locations.
-	catch (Error const& _error)
-	{
-		errors.emplace_back(formatErrorWithException(
-			compilerStack,
-			_error,
-			_error.type(),
-			"general",
-			"Uncaught error: "
-		));
-	}
-	/// This should not be leaked from compile().
-	catch (FatalError const& _exception)
-	{
-		errors.emplace_back(formatError(
-			Error::Type::FatalError,
-			"general",
-			"Uncaught fatal error: " + boost::diagnostic_information(_exception)
-		));
-	}
 	catch (CompilerError const& _exception)
 	{
 		errors.emplace_back(formatErrorWithException(
@@ -1402,13 +1383,8 @@ Json StandardCompiler::compileSolidity(StandardCompiler::InputsAndSettings _inpu
 	}
 	catch (UnimplementedFeatureError const& _exception)
 	{
-		errors.emplace_back(formatErrorWithException(
-			compilerStack,
-			_exception,
-			Error::Type::UnimplementedFeatureError,
-			"general",
-			"Unimplemented feature (" + _exception.lineInfo() + ")"
-		));
+		// let StandardCompiler::compile handle this
+		throw _exception;
 	}
 	catch (yul::YulException const& _exception)
 	{
@@ -1430,22 +1406,6 @@ Json StandardCompiler::compileSolidity(StandardCompiler::InputsAndSettings _inpu
 			"SMT logic exception"
 		));
 	}
-	catch (util::Exception const& _exception)
-	{
-		errors.emplace_back(formatError(
-			Error::Type::Exception,
-			"general",
-			"Exception during compilation: " + boost::diagnostic_information(_exception)
-		));
-	}
-	catch (std::exception const& _exception)
-	{
-		errors.emplace_back(formatError(
-			Error::Type::Exception,
-			"general",
-			"Unknown exception during compilation: " + boost::diagnostic_information(_exception)
-		));
-	}
 	catch (...)
 	{
 		errors.emplace_back(formatError(
@@ -1463,18 +1423,13 @@ Json StandardCompiler::compileSolidity(StandardCompiler::InputsAndSettings _inpu
 	// Note that not completing analysis due to stopAfter does not count as a failure. It's neither failure nor success.
 	bool analysisFailed = !analysisSuccess && _inputsAndSettings.stopAfter >= CompilerStack::State::AnalysisSuccessful;
 	bool compilationFailed = !compilationSuccess && binariesRequested;
-
-	/// Inconsistent state - stop here to receive error reports from users
-	if (
-		(compilationFailed || analysisFailed || !parsingSuccess) &&
-		errors.empty()
-	)
-		return formatFatalError(Error::Type::InternalCompilerError, "No error reported, but compilation failed.");
+	if (compilationFailed || analysisFailed || !parsingSuccess)
+		solAssert(!errors.empty(), "No error reported, but compilation failed.");
 
 	Json output;
 
 	if (errors.size() > 0)
-		output["errors"] = std::move(errors);
+	output["errors"] = std::move(errors);
 
 	if (!compilerStack.unhandledSMTLib2Queries().empty())
 		for (std::string const& query: compilerStack.unhandledSMTLib2Queries())
@@ -1683,7 +1638,7 @@ Json StandardCompiler::compileYul(InputsAndSettings _inputsAndSettings)
 		return output;
 	}
 
-	std::string contractName = stack.parserResult()->name.str();
+	std::string contractName = stack.parserResult()->name;
 
 	bool const wildcardMatchesExperimental = true;
 	if (isArtifactRequested(_inputsAndSettings.outputSelection, sourceName, contractName, "ir", wildcardMatchesExperimental))
@@ -1764,33 +1719,10 @@ Json StandardCompiler::compile(Json const& _input) noexcept
 		else
 			return formatFatalError(Error::Type::JSONError, "Only \"Solidity\", \"Yul\", \"SolidityAST\" or \"EVMAssembly\" is supported as a language.");
 	}
-	catch (Json::parse_error const& _exception)
+	catch (UnimplementedFeatureError const& _exception)
 	{
-		return formatFatalError(Error::Type::InternalCompilerError, std::string("JSON parse_error exception: ") + util::removeNlohmannInternalErrorIdentifier(_exception.what()));
-	}
-	catch (Json::invalid_iterator const& _exception)
-	{
-		return formatFatalError(Error::Type::InternalCompilerError, std::string("JSON invalid_iterator exception: ") + util::removeNlohmannInternalErrorIdentifier(_exception.what()));
-	}
-	catch (Json::type_error const& _exception)
-	{
-		return formatFatalError(Error::Type::InternalCompilerError, std::string("JSON type_error exception: ") + util::removeNlohmannInternalErrorIdentifier(_exception.what()));
-	}
-	catch (Json::out_of_range const& _exception)
-	{
-		return formatFatalError(Error::Type::InternalCompilerError, std::string("JSON out_of_range exception: ") + util::removeNlohmannInternalErrorIdentifier(_exception.what()));
-	}
-	catch (Json::other_error const& _exception)
-	{
-		return formatFatalError(Error::Type::InternalCompilerError, std::string("JSON other_error exception: ") + util::removeNlohmannInternalErrorIdentifier(_exception.what()));
-	}
-	catch (Json::exception const& _exception)
-	{
-		return formatFatalError(Error::Type::InternalCompilerError, std::string("JSON runtime exception: ") + util::removeNlohmannInternalErrorIdentifier(_exception.what()));
-	}
-	catch (util::Exception const& _exception)
-	{
-		return formatFatalError(Error::Type::InternalCompilerError, "Internal exception in StandardCompiler::compile: " + boost::diagnostic_information(_exception));
+		solAssert(_exception.comment(), "Unimplemented feature errors must include a message for the user");
+		return formatFatalError(Error::Type::UnimplementedFeatureError, stringOrDefault(_exception.comment()));
 	}
 	catch (...)
 	{

@@ -176,10 +176,9 @@ ASTPointer<SourceUnit> Parser::parse(CharStream& _charStream)
 		solAssert(m_recursionDepth == 0, "");
 		return nodeFactory.createNode<SourceUnit>(findLicenseString(nodes), nodes, m_experimentalSolidityEnabledInCurrentSourceUnit);
 	}
-	catch (FatalError const&)
+	catch (FatalError const& error)
 	{
-		if (m_errorReporter.errors().empty())
-			throw; // Something is weird here, rather throw again.
+		solAssert(m_errorReporter.hasErrors(), "Unreported fatal error: "s + error.what());
 		return nullptr;
 	}
 }
@@ -885,6 +884,19 @@ ASTPointer<VariableDeclaration> Parser::parseVariableDeclaration(
 						solAssert(false, "Unknown data location.");
 					}
 				}
+			}
+			else if (
+				_options.kind == VarDeclKind::State &&
+				token == Token::Identifier &&
+				m_scanner->currentLiteral() == "transient" &&
+				m_scanner->peekNextToken() != Token::Assign &&
+				m_scanner->peekNextToken() != Token::Semicolon
+			)
+			{
+				if (location != VariableDeclaration::Location::Unspecified)
+					parserError(ErrorId{3548}, "Location already specified.");
+				else
+					location = VariableDeclaration::Location::Transient;
 			}
 			else
 				break;
