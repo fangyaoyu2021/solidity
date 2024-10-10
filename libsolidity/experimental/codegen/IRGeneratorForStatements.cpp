@@ -25,9 +25,9 @@
 
 #include <libsolidity/experimental/ast/TypeSystemHelper.h>
 
-#include <libyul/YulStack.h>
 #include <libyul/AsmPrinter.h>
 #include <libyul/AST.h>
+#include <libyul/backends/evm/EVMDialect.h>
 #include <libyul/optimiser/ASTCopier.h>
 
 #include <libsolidity/experimental/codegen/Common.h>
@@ -130,7 +130,7 @@ bool IRGeneratorForStatements::visit(TupleExpression const& _tupleExpression)
 bool IRGeneratorForStatements::visit(InlineAssembly const& _assembly)
 {
 	CopyTranslate bodyCopier{m_context, _assembly.dialect(), _assembly.annotation().externalReferences};
-	yul::Statement modified = bodyCopier(_assembly.operations());
+	yul::Statement modified = bodyCopier(_assembly.operations().root());
 	solAssert(std::holds_alternative<yul::Block>(modified));
 	m_code << yul::AsmPrinter()(std::get<yul::Block>(modified)) << "\n";
 	return false;

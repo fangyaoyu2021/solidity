@@ -106,7 +106,7 @@ void FullInliner::run(Pass _pass)
 	for (auto& statement: m_ast.statements)
 		if (std::holds_alternative<FunctionDefinition>(statement))
 			functions.emplace_back(&std::get<FunctionDefinition>(statement));
-	std::stable_sort(functions.begin(), functions.end(), [depths](
+	std::stable_sort(functions.begin(), functions.end(), [&depths](
 		FunctionDefinition const* _a,
 		FunctionDefinition const* _b
 	) {
@@ -298,14 +298,14 @@ std::vector<Statement> InlineModifier::performInline(Statement& _statement, Func
 
 	// helper function to create a new variable that is supposed to model
 	// an existing variable.
-	auto newVariable = [&](TypedName const& _existingVariable, Expression* _value) {
+	auto newVariable = [&](NameWithDebugData const& _existingVariable, Expression* _value) {
 		YulName newName = m_nameDispenser.newName(_existingVariable.name);
 		variableReplacements[_existingVariable.name] = newName;
-		VariableDeclaration varDecl{_funCall.debugData, {{_funCall.debugData, newName, _existingVariable.type}}, {}};
+		VariableDeclaration varDecl{_funCall.debugData, {{_funCall.debugData, newName}}, {}};
 		if (_value)
 			varDecl.value = std::make_unique<Expression>(std::move(*_value));
 		else
-			varDecl.value = std::make_unique<Expression>(m_dialect.zeroLiteralForType(varDecl.variables.front().type));
+			varDecl.value = std::make_unique<Expression>(m_dialect.zeroLiteral());
 		newStatements.emplace_back(std::move(varDecl));
 	};
 

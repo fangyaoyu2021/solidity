@@ -150,21 +150,6 @@ Json formatErrorWithException(
 	return error;
 }
 
-std::map<std::string, std::set<std::string>> requestedContractNames(Json const& _outputSelection)
-{
-	std::map<std::string, std::set<std::string>> contracts;
-	for (auto const& [sourceName, _]: _outputSelection.items())
-	{
-		std::string key = (sourceName == "*") ? "" : sourceName;
-		for (auto const& [contractName, _]: _outputSelection[sourceName].items())
-		{
-			std::string value = (contractName == "*") ? "" : contractName;
-			contracts[key].insert(value);
-		}
-	}
-	return contracts;
-}
-
 /// Returns true iff @a _hash (hex with 0x prefix) is the Keccak256 hash of the binary data in @a _content.
 bool hashMatchesContent(std::string const& _hash, std::string const& _content)
 {
@@ -180,7 +165,7 @@ bool hashMatchesContent(std::string const& _hash, std::string const& _content)
 
 bool isArtifactRequested(Json const& _outputSelection, std::string const& _artifact, bool _wildcardMatchesExperimental)
 {
-	static std::set<std::string> experimental{"ir", "irAst", "irOptimized", "irOptimizedAst"};
+	static std::set<std::string> experimental{"ir", "irAst", "irOptimized", "irOptimizedAst", "yulCFGJson"};
 	for (auto const& selectedArtifactJson: _outputSelection)
 	{
 		std::string const& selectedArtifact = selectedArtifactJson.get<std::string>();
@@ -191,6 +176,9 @@ bool isArtifactRequested(Json const& _outputSelection, std::string const& _artif
 			return true;
 		else if (selectedArtifact == "*")
 		{
+			// TODO: yulCFGJson is only experimental now, so it should not be matched by "*".
+			if (_artifact == "yulCFGJson")
+				return false;
 			// "ir", "irOptimized" can only be matched by "*" if activated.
 			if (experimental.count(_artifact) == 0 || _wildcardMatchesExperimental)
 				return true;
@@ -264,7 +252,7 @@ bool isBinaryRequested(Json const& _outputSelection)
 	// This does not include "evm.methodIdentifiers" on purpose!
 	static std::vector<std::string> const outputsThatRequireBinaries = std::vector<std::string>{
 		"*",
-		"ir", "irAst", "irOptimized", "irOptimizedAst",
+		"ir", "irAst", "irOptimized", "irOptimizedAst", "yulCFGJson",
 		"evm.gasEstimates", "evm.legacyAssembly", "evm.assembly"
 	} + evmObjectComponents("bytecode") + evmObjectComponents("deployedBytecode");
 
@@ -295,25 +283,45 @@ bool isEvmBytecodeRequested(Json const& _outputSelection)
 	return false;
 }
 
-/// @returns true if any Yul IR was requested. Note that as an exception, '*' does not
-/// yet match "ir", "irAst", "irOptimized" or "irOptimizedAst"
-bool isIRRequested(Json const& _outputSelection)
+/// @returns The set of selected contracts, along with their compiler pipeline configuration, based
+/// on outputs requested in the JSON. Translates wildcards to the ones understood by CompilerStack.
+/// Note that as an exception, '*' does not yet match "ir", "irAst", "irOptimized" or "irOptimizedAst".
+CompilerStack::ContractSelection pipelineConfig(
+	Json const& _jsonOutputSelection
+)
 {
-	if (!_outputSelection.is_object())
-		return false;
+	if (!_jsonOutputSelection.is_object())
+		return {};
 
-	for (auto const& fileRequests: _outputSelection)
-		for (auto const& requests: fileRequests)
-			for (auto const& request: requests)
-				if (
-					request == "ir" ||
-					request == "irAst" ||
+	CompilerStack::ContractSelection contractSelection;
+	for (auto const& [sourceUnitName, jsonOutputSelectionForSource]: _jsonOutputSelection.items())
+	{
+		solAssert(jsonOutputSelectionForSource.is_object());
+		for (auto const& [contractName, jsonOutputSelectionForContract]: jsonOutputSelectionForSource.items())
+		{
+			solAssert(jsonOutputSelectionForContract.is_array());
+			CompilerStack::PipelineConfig pipelineForContract;
+			for (Json const& request: jsonOutputSelectionForContract)
+			{
+				solAssert(request.is_string());
+				pipelineForContract.irOptimization =
+					pipelineForContract.irOptimization ||
 					request == "irOptimized" ||
-					request == "irOptimizedAst"
-				)
-					return true;
-
-	return false;
+					request == "irOptimizedAst" ||
+					request == "yulCFGJson";
+				pipelineForContract.irCodegen =
+					pipelineForContract.irCodegen ||
+					pipelineForContract.irOptimization ||
+					request == "ir" ||
+					request == "irAst";
+				pipelineForContract.bytecode = isEvmBytecodeRequested(_jsonOutputSelection);
+			}
+			std::string key = (sourceUnitName == "*") ? "" : sourceUnitName;
+			std::string value = (contractName == "*") ? "" : contractName;
+			contractSelection[key][value] = pipelineForContract;
+		}
+	}
+	return contractSelection;
 }
 
 Json formatLinkReferences(std::map<size_t, std::string> const& linkReferences)
@@ -345,7 +353,7 @@ Json formatLinkReferences(std::map<size_t, std::string> const& linkReferences)
 	return ret;
 }
 
-Json formatImmutableReferences(std::map<u256, std::pair<std::string, std::vector<size_t>>> const& _immutableReferences)
+Json formatImmutableReferences(std::map<u256, evmasm::LinkerObject::ImmutableRefs> const& _immutableReferences)
 {
 	Json ret = Json::object();
 
@@ -425,7 +433,7 @@ std::optional<Json> checkAuxiliaryInputKeys(Json const& _input)
 
 std::optional<Json> checkSettingsKeys(Json const& _input)
 {
-	static std::set<std::string> keys{"debug", "evmVersion", "libraries", "metadata", "modelChecker", "optimizer", "outputSelection", "remappings", "stopAfter", "viaIR"};
+	static std::set<std::string> keys{"debug", "evmVersion", "eofVersion", "libraries", "metadata", "modelChecker", "optimizer", "outputSelection", "remappings", "stopAfter", "viaIR"};
 	return checkKeys(_input, keys, "settings");
 }
 
@@ -836,7 +844,7 @@ std::variant<StandardCompiler::InputsAndSettings, Json> StandardCompiler::parseI
 	{
 		if (!settings["eofVersion"].is_number_unsigned())
 			return formatFatalError(Error::Type::JSONError, "eofVersion must be an unsigned integer.");
-		auto eofVersion = settings["evmVersion"].get<uint8_t>();
+		auto eofVersion = settings["eofVersion"].get<uint8_t>();
 		if (eofVersion != 1)
 			return formatFatalError(Error::Type::JSONError, "Invalid EOF version requested.");
 		ret.eofVersion = 1;
@@ -1200,7 +1208,7 @@ Json StandardCompiler::importEVMAssembly(StandardCompiler::InputsAndSettings _in
 	if (!isBinaryRequested(_inputsAndSettings.outputSelection))
 		return Json::object();
 
-	evmasm::EVMAssemblyStack stack(_inputsAndSettings.evmVersion);
+	evmasm::EVMAssemblyStack stack(_inputsAndSettings.evmVersion, _inputsAndSettings.eofVersion);
 	std::string const& sourceName = _inputsAndSettings.jsonSources.begin()->first; // result of structured binding can only be used within lambda from C++20 on.
 	Json const& sourceJson = _inputsAndSettings.jsonSources.begin()->second;
 	try
@@ -1307,6 +1315,7 @@ Json StandardCompiler::compileSolidity(StandardCompiler::InputsAndSettings _inpu
 		compilerStack.addSMTLib2Response(smtLib2Response.first, smtLib2Response.second);
 	compilerStack.setViaIR(_inputsAndSettings.viaIR);
 	compilerStack.setEVMVersion(_inputsAndSettings.evmVersion);
+	compilerStack.setEOFVersion(_inputsAndSettings.eofVersion);
 	compilerStack.setRemappings(std::move(_inputsAndSettings.remappings));
 	compilerStack.setOptimiserSettings(std::move(_inputsAndSettings.optimiserSettings));
 	compilerStack.setRevertStringBehaviour(_inputsAndSettings.revertStrings);
@@ -1316,11 +1325,8 @@ Json StandardCompiler::compileSolidity(StandardCompiler::InputsAndSettings _inpu
 	compilerStack.useMetadataLiteralSources(_inputsAndSettings.metadataLiteralSources);
 	compilerStack.setMetadataFormat(_inputsAndSettings.metadataFormat);
 	compilerStack.setMetadataHash(_inputsAndSettings.metadataHash);
-	compilerStack.setRequestedContractNames(requestedContractNames(_inputsAndSettings.outputSelection));
+	compilerStack.selectContracts(pipelineConfig(_inputsAndSettings.outputSelection));
 	compilerStack.setModelCheckerSettings(_inputsAndSettings.modelCheckerSettings);
-
-	compilerStack.enableEvmBytecodeGeneration(isEvmBytecodeRequested(_inputsAndSettings.outputSelection));
-	compilerStack.enableIRGeneration(isIRRequested(_inputsAndSettings.outputSelection));
 
 	Json errors = std::move(_inputsAndSettings.errors);
 
@@ -1429,7 +1435,7 @@ Json StandardCompiler::compileSolidity(StandardCompiler::InputsAndSettings _inpu
 	Json output;
 
 	if (errors.size() > 0)
-	output["errors"] = std::move(errors);
+		output["errors"] = std::move(errors);
 
 	if (!compilerStack.unhandledSMTLib2Queries().empty())
 		for (std::string const& query: compilerStack.unhandledSMTLib2Queries())
@@ -1465,6 +1471,8 @@ Json StandardCompiler::compileSolidity(StandardCompiler::InputsAndSettings _inpu
 			contractData["abi"] = compilerStack.contractABI(contractName);
 		if (isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "storageLayout", false))
 			contractData["storageLayout"] = compilerStack.storageLayout(contractName);
+		if (isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "transientStorageLayout", false))
+			contractData["transientStorageLayout"] = compilerStack.transientStorageLayout(contractName);
 		if (isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "metadata", wildcardMatchesExperimental))
 			contractData["metadata"] = compilerStack.metadata(contractName);
 		if (isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "userdoc", wildcardMatchesExperimental))
@@ -1481,6 +1489,8 @@ Json StandardCompiler::compileSolidity(StandardCompiler::InputsAndSettings _inpu
 			contractData["irOptimized"] = compilerStack.yulIROptimized(contractName);
 		if (compilationSuccess && isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "irOptimizedAst", wildcardMatchesExperimental))
 			contractData["irOptimizedAst"] = compilerStack.yulIROptimizedAst(contractName);
+		if (compilationSuccess && isArtifactRequested(_inputsAndSettings.outputSelection, file, name, "yulCFGJson", wildcardMatchesExperimental))
+			contractData["yulCFGJson"] = compilerStack.yulCFGJson(contractName);
 
 		// EVM
 		Json evmData;
@@ -1611,32 +1621,23 @@ Json StandardCompiler::compileYul(InputsAndSettings _inputsAndSettings)
 	std::string const& sourceContents = _inputsAndSettings.sources.begin()->second;
 
 	// Inconsistent state - stop here to receive error reports from users
-	if (!stack.parseAndAnalyze(sourceName, sourceContents) && stack.errors().empty())
+	if (!stack.parseAndAnalyze(sourceName, sourceContents) && !stack.hasErrors())
+		solAssert(false, "No error reported, but parsing/analysis failed.");
+
+	for (auto const& error: stack.errors())
 	{
-		output["errors"].emplace_back(formatError(
-			Error::Type::InternalCompilerError,
+		auto err = std::dynamic_pointer_cast<Error const>(error);
+
+		output["errors"].emplace_back(formatErrorWithException(
+			stack,
+			*error,
+			err->type(),
 			"general",
-			"No error reported, but compilation failed."
+			""
 		));
-		return output;
 	}
-
-	if (!stack.errors().empty())
-	{
-		for (auto const& error: stack.errors())
-		{
-			auto err = std::dynamic_pointer_cast<Error const>(error);
-
-			output["errors"].emplace_back(formatErrorWithException(
-				stack,
-				*error,
-				err->type(),
-				"general",
-				""
-			));
-		}
+	if (stack.hasErrors())
 		return output;
-	}
 
 	std::string contractName = stack.parserResult()->name;
 
@@ -1693,7 +1694,9 @@ Json StandardCompiler::compileYul(InputsAndSettings _inputsAndSettings)
 	if (isArtifactRequested(_inputsAndSettings.outputSelection, sourceName, contractName, "irOptimized", wildcardMatchesExperimental))
 		output["contracts"][sourceName][contractName]["irOptimized"] = stack.print();
 	if (isArtifactRequested(_inputsAndSettings.outputSelection, sourceName, contractName, "evm.assembly", wildcardMatchesExperimental))
-		output["contracts"][sourceName][contractName]["evm"]["assembly"] = object.assembly;
+		output["contracts"][sourceName][contractName]["evm"]["assembly"] = object.assembly->assemblyString(stack.debugInfoSelection());
+	if (isArtifactRequested(_inputsAndSettings.outputSelection, sourceName, contractName, "yulCFGJson", wildcardMatchesExperimental))
+		output["contracts"][sourceName][contractName]["yulCFGJson"] = stack.cfgJson();
 
 	return output;
 }

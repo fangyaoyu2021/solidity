@@ -23,18 +23,13 @@
 
 #include <libevmasm/Instruction.h>
 #include <libevmasm/SemanticInformation.h>
-#include <liblangutil/Exceptions.h>
 #include <libsolutil/StringUtils.h>
 #include <libyul/AST.h>
 #include <libyul/AsmAnalysisInfo.h>
-#include <libyul/AsmParser.h>
 #include <libyul/Exceptions.h>
 #include <libyul/Object.h>
 #include <libyul/Utilities.h>
 #include <libyul/backends/evm/AbstractAssembly.h>
-
-#include <range/v3/view/reverse.hpp>
-#include <range/v3/view/tail.hpp>
 
 #include <regex>
 
@@ -55,8 +50,8 @@ std::pair<YulName, BuiltinFunctionForEVM> createEVMFunction(
 	evmasm::InstructionInfo info = evmasm::instructionInfo(_instruction, _evmVersion);
 	BuiltinFunctionForEVM f;
 	f.name = YulName{_name};
-	f.parameters.resize(static_cast<size_t>(info.args));
-	f.returns.resize(static_cast<size_t>(info.ret));
+	f.numParameters = static_cast<size_t>(info.args);
+	f.numReturns = static_cast<size_t>(info.ret);
 	f.sideEffects = EVMDialect::sideEffectsOfInstruction(_instruction);
 	if (evmasm::SemanticInformation::terminatesControlFlow(_instruction))
 	{
@@ -101,8 +96,8 @@ std::pair<YulName, BuiltinFunctionForEVM> createFunction(
 	YulName name{std::move(_name)};
 	BuiltinFunctionForEVM f;
 	f.name = name;
-	f.parameters.resize(_params);
-	f.returns.resize(_returns);
+	f.numParameters = _params;
+	f.numReturns = _returns;
 	f.sideEffects = std::move(_sideEffects);
 	f.literalArguments = std::move(_literalArguments);
 	f.isMSize = false;
@@ -182,7 +177,7 @@ std::set<YulName> createReservedIdentifiers(langutil::EVMVersion _evmVersion)
 	return reserved;
 }
 
-std::map<YulName, BuiltinFunctionForEVM> createBuiltins(langutil::EVMVersion _evmVersion, bool _objectAccess)
+std::map<YulName, BuiltinFunctionForEVM> createBuiltins(langutil::EVMVersion _evmVersion, std::optional<uint8_t> _eofVersion, bool _objectAccess)
 {
 
 	// Exclude prevrandao as builtin for VMs before paris and difficulty for VMs after paris.
@@ -204,7 +199,7 @@ std::map<YulName, BuiltinFunctionForEVM> createBuiltins(langutil::EVMVersion _ev
 			opcode != evmasm::Instruction::JUMP &&
 			opcode != evmasm::Instruction::JUMPI &&
 			opcode != evmasm::Instruction::JUMPDEST &&
-			_evmVersion.hasOpcode(opcode) &&
+			_evmVersion.hasOpcode(opcode, _eofVersion) &&
 			!prevRandaoException(name)
 		)
 			builtins.emplace(createEVMFunction(_evmVersion, name, opcode));
@@ -240,113 +235,116 @@ std::map<YulName, BuiltinFunctionForEVM> createBuiltins(langutil::EVMVersion _ev
 			})
 		);
 
-		builtins.emplace(createFunction("datasize", 1, 1, SideEffects{}, {LiteralKind::String}, [](
-			FunctionCall const& _call,
-			AbstractAssembly& _assembly,
-			BuiltinContext& _context
-		) {
-			yulAssert(_context.currentObject, "No object available.");
-			yulAssert(_call.arguments.size() == 1, "");
-			Expression const& arg = _call.arguments.front();
-			YulName const dataName (formatLiteral(std::get<Literal>(arg)));
-			if (_context.currentObject->name == dataName.str())
-				_assembly.appendAssemblySize();
-			else
-			{
-			std::vector<size_t> subIdPath =
-					_context.subIDs.count(dataName.str()) == 0 ?
-						_context.currentObject->pathToSubObject(dataName.str()) :
-						std::vector<size_t>{_context.subIDs.at(dataName.str())};
-				yulAssert(!subIdPath.empty(), "Could not find assembly object <" + dataName.str() + ">.");
-				_assembly.appendDataSize(subIdPath);
-			}
-		}));
-		builtins.emplace(createFunction("dataoffset", 1, 1, SideEffects{}, {LiteralKind::String}, [](
-			FunctionCall const& _call,
-			AbstractAssembly& _assembly,
-			BuiltinContext& _context
-		) {
-			yulAssert(_context.currentObject, "No object available.");
-			yulAssert(_call.arguments.size() == 1, "");
-			Expression const& arg = _call.arguments.front();
-			YulName const dataName (formatLiteral(std::get<Literal>(arg)));
-			if (_context.currentObject->name == dataName.str())
-				_assembly.appendConstant(0);
-			else
-			{
-			std::vector<size_t> subIdPath =
-					_context.subIDs.count(dataName.str()) == 0 ?
-						_context.currentObject->pathToSubObject(dataName.str()) :
-						std::vector<size_t>{_context.subIDs.at(dataName.str())};
-				yulAssert(!subIdPath.empty(), "Could not find assembly object <" + dataName.str() + ">.");
-				_assembly.appendDataOffset(subIdPath);
-			}
-		}));
-		builtins.emplace(createFunction(
-			"datacopy",
-			3,
-			0,
-			SideEffects{
-				false,               // movable
-				true,                // movableApartFromEffects
-				false,               // canBeRemoved
-				false,               // canBeRemovedIfNotMSize
-				true,                // cannotLoop
-				SideEffects::None,   // otherState
-				SideEffects::None,   // storage
-				SideEffects::Write,  // memory
-				SideEffects::None    // transientStorage
-			},
-			{},
-			[](
-				FunctionCall const&,
-				AbstractAssembly& _assembly,
-				BuiltinContext&
-			) {
-				_assembly.appendInstruction(evmasm::Instruction::CODECOPY);
-			}
-		));
-		builtins.emplace(createFunction(
-			"setimmutable",
-			3,
-			0,
-			SideEffects{
-				false,               // movable
-				false,               // movableApartFromEffects
-				false,               // canBeRemoved
-				false,               // canBeRemovedIfNotMSize
-				true,                // cannotLoop
-				SideEffects::None,   // otherState
-				SideEffects::None,   // storage
-				SideEffects::Write,  // memory
-				SideEffects::None    // transientStorage
-			},
-			{std::nullopt, LiteralKind::String, std::nullopt},
-			[](
+		if (!_eofVersion.has_value())
+		{
+			builtins.emplace(createFunction("datasize", 1, 1, SideEffects{}, {LiteralKind::String}, [](
 				FunctionCall const& _call,
 				AbstractAssembly& _assembly,
-				BuiltinContext&
+				BuiltinContext& _context
 			) {
-				yulAssert(_call.arguments.size() == 3, "");
-				auto const identifier = (formatLiteral(std::get<Literal>(_call.arguments[1])));
-				_assembly.appendImmutableAssignment(identifier);
-			}
-		));
-		builtins.emplace(createFunction(
-			"loadimmutable",
-			1,
-			1,
-			SideEffects{},
-			{LiteralKind::String},
-			[](
-				FunctionCall const& _call,
-				AbstractAssembly& _assembly,
-				BuiltinContext&
-			) {
+				yulAssert(_context.currentObject, "No object available.");
 				yulAssert(_call.arguments.size() == 1, "");
-				_assembly.appendImmutable(formatLiteral(std::get<Literal>(_call.arguments.front())));
-			}
-		));
+				Expression const& arg = _call.arguments.front();
+				YulName const dataName (formatLiteral(std::get<Literal>(arg)));
+				if (_context.currentObject->name == dataName.str())
+					_assembly.appendAssemblySize();
+				else
+				{
+				std::vector<size_t> subIdPath =
+						_context.subIDs.count(dataName.str()) == 0 ?
+							_context.currentObject->pathToSubObject(dataName.str()) :
+							std::vector<size_t>{_context.subIDs.at(dataName.str())};
+					yulAssert(!subIdPath.empty(), "Could not find assembly object <" + dataName.str() + ">.");
+					_assembly.appendDataSize(subIdPath);
+				}
+			}));
+			builtins.emplace(createFunction("dataoffset", 1, 1, SideEffects{}, {LiteralKind::String}, [](
+				FunctionCall const& _call,
+				AbstractAssembly& _assembly,
+				BuiltinContext& _context
+			) {
+				yulAssert(_context.currentObject, "No object available.");
+				yulAssert(_call.arguments.size() == 1, "");
+				Expression const& arg = _call.arguments.front();
+				YulName const dataName (formatLiteral(std::get<Literal>(arg)));
+				if (_context.currentObject->name == dataName.str())
+					_assembly.appendConstant(0);
+				else
+				{
+				std::vector<size_t> subIdPath =
+						_context.subIDs.count(dataName.str()) == 0 ?
+							_context.currentObject->pathToSubObject(dataName.str()) :
+							std::vector<size_t>{_context.subIDs.at(dataName.str())};
+					yulAssert(!subIdPath.empty(), "Could not find assembly object <" + dataName.str() + ">.");
+					_assembly.appendDataOffset(subIdPath);
+				}
+			}));
+			builtins.emplace(createFunction(
+				"datacopy",
+				3,
+				0,
+				SideEffects{
+					false,               // movable
+					true,                // movableApartFromEffects
+					false,               // canBeRemoved
+					false,               // canBeRemovedIfNotMSize
+					true,                // cannotLoop
+					SideEffects::None,   // otherState
+					SideEffects::None,   // storage
+					SideEffects::Write,  // memory
+					SideEffects::None    // transientStorage
+				},
+				{},
+				[](
+					FunctionCall const&,
+					AbstractAssembly& _assembly,
+					BuiltinContext&
+				) {
+					_assembly.appendInstruction(evmasm::Instruction::CODECOPY);
+				}
+			));
+			builtins.emplace(createFunction(
+				"setimmutable",
+				3,
+				0,
+				SideEffects{
+					false,               // movable
+					false,               // movableApartFromEffects
+					false,               // canBeRemoved
+					false,               // canBeRemovedIfNotMSize
+					true,                // cannotLoop
+					SideEffects::None,   // otherState
+					SideEffects::None,   // storage
+					SideEffects::Write,  // memory
+					SideEffects::None    // transientStorage
+				},
+				{std::nullopt, LiteralKind::String, std::nullopt},
+				[](
+					FunctionCall const& _call,
+					AbstractAssembly& _assembly,
+					BuiltinContext&
+				) {
+					yulAssert(_call.arguments.size() == 3, "");
+					auto const identifier = (formatLiteral(std::get<Literal>(_call.arguments[1])));
+					_assembly.appendImmutableAssignment(identifier);
+				}
+			));
+			builtins.emplace(createFunction(
+				"loadimmutable",
+				1,
+				1,
+				SideEffects{},
+				{LiteralKind::String},
+				[](
+					FunctionCall const& _call,
+					AbstractAssembly& _assembly,
+					BuiltinContext&
+				) {
+					yulAssert(_call.arguments.size() == 1, "");
+					_assembly.appendImmutable(formatLiteral(std::get<Literal>(_call.arguments.front())));
+				}
+			));
+		}
 	}
 	return builtins;
 }
@@ -360,10 +358,11 @@ std::regex const& verbatimPattern()
 }
 
 
-EVMDialect::EVMDialect(langutil::EVMVersion _evmVersion, bool _objectAccess):
+EVMDialect::EVMDialect(langutil::EVMVersion _evmVersion, std::optional<uint8_t> _eofVersion, bool _objectAccess):
 	m_objectAccess(_objectAccess),
 	m_evmVersion(_evmVersion),
-	m_functions(createBuiltins(_evmVersion, _objectAccess)),
+	m_eofVersion(_eofVersion),
+	m_functions(createBuiltins(_evmVersion, _eofVersion, _objectAccess)),
 	m_reserved(createReservedIdentifiers(_evmVersion))
 {
 }
@@ -391,22 +390,22 @@ bool EVMDialect::reservedIdentifier(YulName _name) const
 	return m_reserved.count(_name) != 0;
 }
 
-EVMDialect const& EVMDialect::strictAssemblyForEVM(langutil::EVMVersion _version)
+EVMDialect const& EVMDialect::strictAssemblyForEVM(langutil::EVMVersion _evmVersion, std::optional<uint8_t> _eofVersion)
 {
-	static std::map<langutil::EVMVersion, std::unique_ptr<EVMDialect const>> dialects;
+	static std::map<std::pair<langutil::EVMVersion, std::optional<uint8_t>>, std::unique_ptr<EVMDialect const>> dialects;
 	static YulStringRepository::ResetCallback callback{[&] { dialects.clear(); }};
-	if (!dialects[_version])
-		dialects[_version] = std::make_unique<EVMDialect>(_version, false);
-	return *dialects[_version];
+	if (!dialects[{_evmVersion, _eofVersion}])
+		dialects[{_evmVersion, _eofVersion}] = std::make_unique<EVMDialect>(_evmVersion, _eofVersion, false);
+	return *dialects[{_evmVersion, _eofVersion}];
 }
 
-EVMDialect const& EVMDialect::strictAssemblyForEVMObjects(langutil::EVMVersion _version)
+EVMDialect const& EVMDialect::strictAssemblyForEVMObjects(langutil::EVMVersion _evmVersion, std::optional<uint8_t> _eofVersion)
 {
-	static std::map<langutil::EVMVersion, std::unique_ptr<EVMDialect const>> dialects;
+	static std::map<std::pair<langutil::EVMVersion, std::optional<uint8_t>>, std::unique_ptr<EVMDialect const>> dialects;
 	static YulStringRepository::ResetCallback callback{[&] { dialects.clear(); }};
-	if (!dialects[_version])
-		dialects[_version] = std::make_unique<EVMDialect>(_version, true);
-	return *dialects[_version];
+	if (!dialects[{_evmVersion, _eofVersion}])
+		dialects[{_evmVersion, _eofVersion}] = std::make_unique<EVMDialect>(_evmVersion, _eofVersion, true);
+	return *dialects[{_evmVersion, _eofVersion}];
 }
 
 SideEffects EVMDialect::sideEffectsOfInstruction(evmasm::Instruction _instruction)
@@ -460,107 +459,4 @@ BuiltinFunctionForEVM const* EVMDialect::verbatimFunction(size_t _arguments, siz
 		function = std::make_shared<BuiltinFunctionForEVM const>(std::move(builtinFunction));
 	}
 	return function.get();
-}
-
-EVMDialectTyped::EVMDialectTyped(langutil::EVMVersion _evmVersion, bool _objectAccess):
-	EVMDialect(_evmVersion, _objectAccess)
-{
-	defaultType = "u256"_yulname;
-	boolType = "bool"_yulname;
-	types = {defaultType, boolType};
-
-	// Set all types to ``defaultType``
-	for (auto& fun: m_functions)
-	{
-		for (auto& p: fun.second.parameters)
-			p = defaultType;
-		for (auto& r: fun.second.returns)
-			r = defaultType;
-	}
-
-	m_functions["lt"_yulname].returns = {"bool"_yulname};
-	m_functions["gt"_yulname].returns = {"bool"_yulname};
-	m_functions["slt"_yulname].returns = {"bool"_yulname};
-	m_functions["sgt"_yulname].returns = {"bool"_yulname};
-	m_functions["eq"_yulname].returns = {"bool"_yulname};
-
-	// "not" and "bitnot" replace "iszero" and "not"
-	m_functions["bitnot"_yulname] = m_functions["not"_yulname];
-	m_functions["bitnot"_yulname].name = "bitnot"_yulname;
-	m_functions["not"_yulname] = m_functions["iszero"_yulname];
-	m_functions["not"_yulname].name = "not"_yulname;
-	m_functions["not"_yulname].returns = {"bool"_yulname};
-	m_functions["not"_yulname].parameters = {"bool"_yulname};
-	m_functions.erase("iszero"_yulname);
-
-	m_functions["bitand"_yulname] = m_functions["and"_yulname];
-	m_functions["bitand"_yulname].name = "bitand"_yulname;
-	m_functions["bitor"_yulname] = m_functions["or"_yulname];
-	m_functions["bitor"_yulname].name = "bitor"_yulname;
-	m_functions["bitxor"_yulname] = m_functions["xor"_yulname];
-	m_functions["bitxor"_yulname].name = "bitxor"_yulname;
-	m_functions["and"_yulname].parameters = {"bool"_yulname, "bool"_yulname};
-	m_functions["and"_yulname].returns = {"bool"_yulname};
-	m_functions["or"_yulname].parameters = {"bool"_yulname, "bool"_yulname};
-	m_functions["or"_yulname].returns = {"bool"_yulname};
-	m_functions["xor"_yulname].parameters = {"bool"_yulname, "bool"_yulname};
-	m_functions["xor"_yulname].returns = {"bool"_yulname};
-	m_functions["popbool"_yulname] = m_functions["pop"_yulname];
-	m_functions["popbool"_yulname].name = "popbool"_yulname;
-	m_functions["popbool"_yulname].parameters = {"bool"_yulname};
-	m_functions.insert(createFunction("bool_to_u256", 1, 1, {}, {}, [](
-		FunctionCall const&,
-		AbstractAssembly&,
-		BuiltinContext&
-	) {}));
-	m_functions["bool_to_u256"_yulname].parameters = {"bool"_yulname};
-	m_functions["bool_to_u256"_yulname].returns = {"u256"_yulname};
-	m_functions.insert(createFunction("u256_to_bool", 1, 1, {}, {}, [](
-		FunctionCall const&,
-		AbstractAssembly& _assembly,
-		BuiltinContext&
-	) {
-		// TODO this should use a Panic.
-		// A value larger than 1 causes an invalid instruction.
-		_assembly.appendConstant(2);
-		_assembly.appendInstruction(evmasm::Instruction::DUP2);
-		_assembly.appendInstruction(evmasm::Instruction::LT);
-		AbstractAssembly::LabelID inRange = _assembly.newLabelId();
-		_assembly.appendJumpToIf(inRange);
-		_assembly.appendInstruction(evmasm::Instruction::INVALID);
-		_assembly.appendLabel(inRange);
-	}));
-	m_functions["u256_to_bool"_yulname].parameters = {"u256"_yulname};
-	m_functions["u256_to_bool"_yulname].returns = {"bool"_yulname};
-}
-
-BuiltinFunctionForEVM const* EVMDialectTyped::discardFunction(YulName _type) const
-{
-	if (_type == "bool"_yulname)
-		return builtin("popbool"_yulname);
-	else
-	{
-		yulAssert(_type == defaultType, "");
-		return builtin("pop"_yulname);
-	}
-}
-
-BuiltinFunctionForEVM const* EVMDialectTyped::equalityFunction(YulName _type) const
-{
-	if (_type == "bool"_yulname)
-		return nullptr;
-	else
-	{
-		yulAssert(_type == defaultType, "");
-		return builtin("eq"_yulname);
-	}
-}
-
-EVMDialectTyped const& EVMDialectTyped::instance(langutil::EVMVersion _version)
-{
-	static std::map<langutil::EVMVersion, std::unique_ptr<EVMDialectTyped const>> dialects;
-	static YulStringRepository::ResetCallback callback{[&] { dialects.clear(); }};
-	if (!dialects[_version])
-		dialects[_version] = std::make_unique<EVMDialectTyped>(_version, true);
-	return *dialects[_version];
 }

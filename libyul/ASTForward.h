@@ -46,8 +46,9 @@ struct Continue;
 struct Leave;
 struct ExpressionStatement;
 struct Block;
+class AST;
 
-struct TypedName;
+struct NameWithDebugData;
 
 using Expression = std::variant<FunctionCall, Identifier, Literal>;
 using Statement = std::variant<ExpressionStatement, Assignment, VariableDeclaration, FunctionDefinition, If, Switch, ForLoop, Break, Continue, Leave, Block>;
